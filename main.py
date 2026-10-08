@@ -1,37 +1,3 @@
-#!/usr/bin/env python3
-"""main.py — Router MAVLink + monitor "servo lewat QGC" (bench di mini PC).
-
-Topologi yang dibangun:
-
-    laptop (QGC + joystick Xbox)
-        │  UDP ke mini PC port 14550  (QGC: Comm Link type UDP, listen 14550)
-        ▼
-   [mini PC]  :  main.py  (router MAVLink dua arah)
-        │  serial / USB  (Pixhawk)
-        ▼
-      Pixhawk  ── PWM ──►  servo / ESC   (output TETAP di tangan Pixhawk)
-
-Yang dikerjakan skrip ini:
-  1. Meneruskan setiap paket QGC -> Pixhawk (termasuk MANUAL_CONTROL dari
-     joystick) dan Pixhawk -> QGC (telemetri: HEARTBEAT, ATTITUDE, RC).
-  2. Memantau MANUAL_CONTROL, menerjemahkan ke (v, w), lalu menampilkan
-     ringkasan tiap 1 detik.
-  3. FAILSAFE: bila QGC berhenti mengirim paket selama > GCS_TIMEOUT_S
-     (dan pernah mengirim sebelumnya), skrip mengirim nilai NETRAL ke
-     Pixhawk secara periodik sampai koneksi QGC hidup kembali.
-
-PENGAMAN (baca README.md dulu):
-  - Ini alat uji bench, bukan pengganti E-stop / switch RC / kill switch.
-  - Skrip TIDAK menyentuh PWM langsung; Pixhawk satu-satunya penggerak
-    servo. Skrip hanya meneruskan & memantau sinyal MAVLink.
-
-PEMAKAIAN (di mini PC):
-    python3 main.py
-    python3 main.py --serial /dev/ttyACM0 --baud 115200
-    python3 main.py --gcs udpout:192.168.1.50:14550 --verbose
-    # Ctrl+C menghentikan dengan aman (kirim netral, baru tutup koneksi)
-"""
-
 import argparse
 import logging
 import signal
@@ -40,8 +6,8 @@ import time
 
 from pymavlink import mavutil
 
-from mavlink_util import (manual_to_vw, neutral_manual_send,
-                          detect_serial_uart)
+from mavlink_util import (detect_serial_uart, is_port_busy_error,
+                          neutral_manual_send)
 
 # --- Konstanta perilaku (bukan angka ajaib) ---
 GCS_TIMEOUT_S = 1.5        # tanpa paket QGC selama ini -> dianggap putus
@@ -79,7 +45,7 @@ def describe_mode(heartbeat):
 
 
 class Router(object):
-    """Jembatan QGC <-> Pixhawk + monitor + failsafe netral."""
+    """Jembatan QGC <-> Pixhawk + failsafe netral (tanpa monitor servo)."""
 
     def __init__(self, serial_path, baud, gcs_addr):
         self._serial_path = serial_path
@@ -93,16 +59,14 @@ class Router(object):
         self._last_neutral = None
         self._last_log = 0.0
         self._last_warn = 0.0
-        self._last_vw = (0.0, 0.0)
         self._mode_txt = "?"
         # Penghitung untuk log ringkasan/diagnosis.
         self.n_gcs = 0
         self.n_px = 0
-        self.n_manual = 0
 
     # ---------------------------------------------------------- koneksi
     def _ensure_px(self):
-        """Hubungkan ke Pixhawk (serial) secara non-blocking + retry."""
+        """Hubungkan ke Pixhawk (serial/USB) secara non-blocking + retry."""
         if self.px is not None:
             return True
         now = time.monotonic()
@@ -114,8 +78,11 @@ class Router(object):
             candidates = detect_serial_uart()
             if not candidates:
                 log.warning("Belum ada port serial terdeteksi. "
-                            "Colok Pixhawk lalu tunggu...")
+                            "Colok USB Pixhawk lalu tunggu...")
                 return False
+            if len(candidates) > 1:
+                log.info("Port kandidat: %s (pakai %s)",
+                         ", ".join(candidates), candidates[0])
             path = candidates[0]
             log.info("Port auto-detect: %s", path)
         try:
@@ -123,17 +90,22 @@ class Router(object):
             log.info("Pixhawk terhubung via %s @ %d baud", path, self._baud)
             return True
         except Exception as exc:
-            log.warning("Koneksi serial gagal (%s): %s", path, exc)
+            if is_port_busy_error(exc):
+                log.warning("Port %s dipakai aplikasi lain (biasanya link "
+                            "serial QGC masih nyambung). Putuskan link "
+                            "serial di QGC dulu.", path)
+            else:
+                log.warning("Koneksi serial gagal (%s): %s", path, exc)
             self.px = None
             return False
 
     def _ensure_gcs(self):
-        """Buka link UDP ke QGC (udpout: alamat laptop QGC)."""
+        """Buka link UDP ke QGC (udpout: alamat QGC)."""
         if self.gcs is not None:
             return True
         try:
             self.gcs = mavutil.mavlink_connection(self._gcs_addr)
-            log.info("Link GCS aktif: %s (pastikan QGC running listener 14550)",
+            log.info("Link GCS aktif: %s (pastikan QGC listen UDP 14550)",
                      self._gcs_addr)
             return True
         except Exception as exc:
@@ -145,7 +117,7 @@ class Router(object):
     def _forward(self, src, dst, from_gcs):
         """Drain semua paket dari `src`, teruskan raw ke `dst` + pantau.
 
-        from_gcs=True  : paket QGC->Pixhawk (MANUAL_CONTROL dipantau).
+        from_gcs=True  : paket QGC->Pixhawk (catat waktu terima utk failsafe).
         from_gcs=False : paket Pixhawk->QGC (HEARTBEAT dipantau utk mode).
         """
         while True:
@@ -155,9 +127,6 @@ class Router(object):
             if from_gcs:
                 self.n_gcs += 1
                 self._last_gcs_rx = time.monotonic()
-                if msg.get_type() == "MANUAL_CONTROL":
-                    self.n_manual += 1
-                    self._last_vw = manual_to_vw(msg)
             else:
                 self.n_px += 1
                 if msg.get_type() == "HEARTBEAT":
@@ -183,24 +152,21 @@ class Router(object):
                 neutral_manual_send(self.px)
             if now - self._last_warn >= WARN_INTERVAL_S:
                 self._last_warn = now
-                log.warning("QGC tidak mengirim >%.1fs -> netral "
-                            "(v=0, w=0) dikirim ke Pixhawk", GCS_TIMEOUT_S)
+                log.warning("QGC tidak mengirim >%.1fs -> NETRAL dikirim "
+                            "ke Pixhawk (thruster berhenti)", GCS_TIMEOUT_S)
 
     def _periodic_log(self):
-        """Log ringkasan sekali per LOG_INTERVAL_S (hindari banjir)."""
+        """Log status sekali per LOG_INTERVAL_S (hindari banjir)."""
         now = time.monotonic()
         if now - self._last_log < LOG_INTERVAL_S:
             return
         self._last_log = now
-        v, w = self._last_vw
         if self._last_gcs_rx is None:
             rx = "belum ada paket"
         else:
             rx = "%.1fs lalu" % (now - self._last_gcs_rx)
-        log.info("mode=%s | QGC(rx %s) | pkt GCS=%d PX=%d MAN=%d | "
-                 "v=%+.2f w=%+.2f",
-                 self._mode_txt, rx, self.n_gcs, self.n_px,
-                 self.n_manual, v, w)
+        log.info("mode=%s | QGC(rx %s) | pkt GCS=%d PX=%d",
+                 self._mode_txt, rx, self.n_gcs, self.n_px)
 
     # ---------------------------------------------------------- siklus
     def run(self):
@@ -238,13 +204,13 @@ class Router(object):
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--serial", default="",
-                   help="port Pixhawk (mis. /dev/ttyACM0). "
-                        "Kosong = auto-detect.")
+                   help="port Pixhawk, mis. COM3 (Windows) atau "
+                        "/dev/ttyACM0 (Linux). Kosong = auto-detect.")
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD,
-                   help="baud Pixhawk (USB=115200, TELEM2 sering 57600).")
+                   help="baud Pixhawk (USB=115200).")
     p.add_argument("--gcs", default=DEFAULT_GCS,
                    help="link ke QGC, bentuk mavutil. Default %(default)s "
-                        "(127.0.0.1 bila QGC di mini PC yang sama).")
+                        "(127.0.0.1 bila QGC di NUC yang sama).")
     p.add_argument("--verbose", action="store_true",
                    help="log debug (forward error, dsb).")
     return p.parse_args(argv)
@@ -258,7 +224,10 @@ def main(argv=None):
         datefmt="%H:%M:%S")
     router = Router(args.serial, args.baud, args.gcs)
     signal.signal(signal.SIGINT, lambda *_: router.stop())
-    signal.signal(signal.SIGTERM, lambda *_: router.stop())
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: router.stop())
+    except (AttributeError, ValueError, OSError):
+        pass  # SIGTERM tidak tersedia di semua platform
     try:
         router.run()
     finally:

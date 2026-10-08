@@ -1,21 +1,16 @@
-"""mavlink_util.py — Konversi & utilitas MAVLink untuk bench servo QGC.
-
-Isolasi konstanta protokol dan fungsi konversi agar bisa diuji unit
-(tests/test_mavlink_util.py). Nilai berasal dari spesifikasi MAVLink
-pesan MANUAL_CONTROL:
-
-  - x, y, r : int16, rentang [-127, 127]  (rush/pitch, roll, yaw)
-  - z       : uint16, rentang [0, 1000], netral = 500 (throttle)
-
-Untuk kapal permukaan (ASV) hanya dua derajat kebebasan yang dipakai:
-  - v (surge) dari throttle z  -> maju / mundur
-  - w (yaw)   dari stick r     -> belok kiri / kanan
-"""
-
 Z_MIN = 0.0
 Z_MAX = 1000.0
 Z_NEUTRAL = (Z_MIN + Z_MAX) / 2.0   # 500 = stik throttle di tengah
 R_FULL = 127.0                      # deviasi yaw stick penuh
+
+# VID:PID USB yang umum dipakai Pixhawk / PX4 FMU / STM32 VCP.
+PIXHAWK_IDS = frozenset({
+    (0x26AC, 0x0011),  # PX4 FMU v2/v3
+    (0x26AC, 0x0012),  # PX4 FMU v4/v5/v6 (termasuk Pixhawk 6C)
+    (0x0483, 0x5740),  # STM32 Virtual COM Port
+})
+
+_PORT_KEYWORDS = ("px4", "pixhawk", "fmu", "stm32")
 
 
 def clamp1(value):
@@ -62,7 +57,7 @@ def neutral_values():
 def manual_send(master, v, w, target_system=1):
     """Kirim MANUAL_CONTROL (v, w) ke Pixhawk lewat koneksi `master`.
 
-    x dan y (roll/pitch) tidak relevan untuk kapal permukaan -> 0.
+    Untuk tes thruster: v = surge (maju/mundur), w = 0.
     """
     z, r = vw_to_manual(v, w)
     master.mav.manual_control_send(target_system, 0, 0, z, r, 0)
@@ -74,14 +69,49 @@ def neutral_manual_send(master, target_system=1):
     master.mav.manual_control_send(target_system, 0, 0, z, r, 0)
 
 
+def is_port_busy_error(exc):
+    """True bila error mengindikasikan port dikunci aplikasi lain.
+
+    Di Windows ini umum terjadi kalau link serial QGC ke Pixhawk masih
+    nyambung saat skrip Python mencoba buka COM yang sama.
+    """
+    text = str(exc).lower()
+    return any(k in text for k in ("permission", "denied", "busy",
+                                  "access", "lock"))
+
+
+def _looks_like_pixhawk(info):
+    """Cek info port pyserial: cocok VID/PID atau nama produk."""
+    try:
+        if (info.vid, info.pid) in PIXHAWK_IDS:
+            return True
+    except (AttributeError, TypeError):
+        pass
+    desc = " ".join(str(getattr(info, name, "") or "")
+                    for name in ("description", "product", "manufacturer"))
+    return any(k in desc.lower() for k in _PORT_KEYWORDS)
+
+
 def detect_serial_uart():
-    """Path kandidat port serial Pixhawk di Linux.
+    """Daftar kandidat port serial Pixhawk (Windows + Linux).
 
     Urutan prioritas:
-      1. /dev/serial/by-id/*  (symlink stabil, umumnya berisi "pixhawk")
-      2. /dev/ttyACM*         (USB CDC, banyak dipakai Pixhawk)
-      3. /dev/ttyUSB*         (adaptor USB-UART FTDI/CP210x)
+      1. Port yang VID/PID/namanya cocok Pixhawk/PX4 (mis. COM3).
+      2. Bila tak ada yang cocok: di Windows kembalikan semua COM,
+         di Linux pakai pola /dev klasik (/dev/ttyACM*, /dev/ttyUSB*).
     """
+    try:
+        from serial.tools import list_ports
+        ports = list(list_ports.comports())
+    except Exception:
+        ports = []
+    pix = sorted(p.device for p in ports if _looks_like_pixhawk(p))
+    if pix:
+        return pix
+    if ports:
+        import sys
+        if sys.platform.startswith("win"):
+            return sorted(p.device for p in ports)
     import glob
 
     candidates = []

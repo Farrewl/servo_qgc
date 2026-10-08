@@ -1,168 +1,84 @@
-# servo_qgc — Bench "gerakkan servo lewat QGC + joystick"
+# thruster_test — Tes thruster MAJU/MUNDUR via Pixhawk (NUC Windows)
 
-Folder uji mandiri untuk **mini PC / Raspberry Pi**: menjembatani laptop
-QGC (yang joystick-nya sudah dikalibrasi) dengan Pixhawk lewat MAVLink,
-sehingga **servo bisa digerakkan dari joystick di QGC**. Semua kode di sini
-berdiri sendiri (tidak depend ke repo utama) — tinggal salin folder ini ke
-mini PC.
+Folder uji mandiri untuk **ASUS NUC Windows**: ngetes thruster (maju/mundur)
+yang tersambung ke **Pixhawk 6C**. QGC + joystick Xbox jalan di NUC yang sama.
 
-> **PENTING (keselamatan):** alat ini untuk **uji bench darat**. Servo /
-> ESC tetap digerakkan **oleh Pixhawk** (PWM dilakukan Pixhawk); skrip
-> hanya meneruskan dan memantau sinyal MAVLink — bukan pengganti
-> E-stop / switch RC / kill switch bawaan firmware.
+> **PENTING (keselamatan):** alat ini untuk **uji bench darat**.
+> **Lepas baling-baling thruster** sebelum menjalankan. Skrip selalu kirim
+> netral dulu saat berhenti — tapi itu bukan pengganti kill switch.
 
 ---
 
-## Cara kerja
+## Wiring
 
 ```
-laptop: QGC (Applications > Comm Links > UDP, listen 14550)
-        ├─ joystick Xbox dikalibrasi di QGC Settings > Joystick
-        │
-        │  UDP 14550  (QGC mengirim MANUAL_CONTROL + terima telemetri)
-        ▼
-mini PC:  main.py  = router MAVLink dua arah
-        │            • QGC → Pixhawk : semua paket diteruskan (MANUAL_CONTROL dipantau → v,w)
-        │            • Pixhawk → QGC : telemetri diteruskan (HEARTBEAT → tampilkan mode)
-        │            • FAILSAFE      : QGC putus > 1,5 dtk → kirim netral periodik
-        ▼
-      Pixhawk (mode MANUAL)  ── PWM ──►  servo arah / ESC thrust
+Baterai ──► ESC (kabel power merah/hitam)
+Pixhawk MAIN OUT (kabel sinyal putih/kuning) ──► ESC (kabel sinyal)
+ESC (3 kabel motor) ──► thruster
+Pixhawk USB ──► NUC (kabel USB)
 ```
 
-Skala sinyal (sesuai protokol MAVLink `MANUAL_CONTROL`):
-- `z` throttle (0–1000, netral 500) → **v = surge** (maju/mundur)
-- `r` yaw (±127) → **w = yaw** (belok kiri/kanan)
+- Kabel sinyal ESC colok ke **output channel throttle** Pixhawk. Kalau belum
+  tahu channel berapa: buka QGC → Vehicle Setup → Servo Output, gerakkan stik
+  throttle, lihat bar mana yang bergerak — colok ESC ke situ.
+- Ground wajib sama (satu baterai / BEC yang sama).
 
 ---
 
-## Isi folder
+## Instalasi di NUC (PowerShell)
 
-| File | Fungsi |
-|---|---|
-| `main.py` | Router MAVLink QGC↔Pixhawk + monitor (v,w) + failsafe netral |
-| `sweep.py` | Tes gerak servo kiri-kanan otomatis (tanpa QGC) |
-| `demo_loop.py` | Latihan stik via keyboard, tanpa hardware/QGC |
-| `mavlink_util.py` | Konversi & utilitas MAVLink (dipakai semua skrip) |
-| `tests/` | Unit test konversi |
-| `requirements.txt` | Dependensi (pymavlink, pyserial) |
-
----
-
-## Persyaratan
-
-1. **Mini PC / RPi** dengan Linux + Python 3.8+.
-2. **Pixhawk** terhubung ke mini PC (USB) atau melalui telemetri radio
-   (UART). Usb default 115200 baud; TELEM2 sering 57600.
-3. **Servo arah** di output Pixhawk yang dipetakan ke channel **steering
-   / yaw** (cek frame: Manual | Plane & Rover → SERVO output). Thrust
-   (ESC) sebaiknya belum dipasang saat bench pertama.
-4. **Laptop** ber-QGC + joystick (Xbox) yang **sudah dikalibrasi**
-   (QGC Settings → Joystick: pilih joystick → Calibrate → semua sumbu).
-
-### Wiring singkat
-
-- Servo (`GND/VCC/Signal`) → port output Pixhawk channel steering.
-  **Jangan** dicolok ke rail berkekuatan besar tanpa penerangan
-  (pakai BEC/UBEC dengan ground sama yang aman).
-- Pixhawk USB (atau TELEM2) → mini PC.
-- Mini PC & laptop satu jaringan (Wi-Fi router).
-- **Lepas baling-baling / jauhkan benda** sebelum dinyalakan.
-
----
-
-## Instalasi di mini PC
-
-```bash
+```powershell
 cd servo_qgc
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-> `python3-venv` kalau belum ada: `sudo apt install python3-venv`.
+## Cek port Pixhawk
+
+1. Buka **Device Manager → Ports (COM & LPT)** — harus muncul
+   `USB Serial Device (COMx)` saat Pixhawk dicolok USB. Catat COM-nya.
+2. Atau via PowerShell:
+   ```powershell
+   [System.IO.Ports.SerialPort]::getportnames()
+   ```
+
+> **Aturan emas:** satu port COM hanya bisa dibuka **satu aplikasi**.
+> Kalau QGC lagi konek serial ke Pixhawk, Python tidak bisa buka COM yang
+> sama (error `PermissionError` / "port dipakai").
 
 ---
 
-## Menjalankan
+## Cara pakai
 
-### 0) Cek dulu tanpa hardware (disarankan)
+### A) Tes manual pakai Xbox (tanpa Python)
 
-```bash
-.venv/bin/python3 demo_loop.py
-```
-Tekan `W/S/A/D`, `SPASI` (netral), `Q` (keluar). Ini melatih pemetaan
-stik → (v,w) dengan skala identik yang nanti dikirim ke Pixhawk.
+1. QGC konek serial langsung ke Pixhawk (kondisi kamu sekarang — sudah jalan).
+2. Set mode **MANUAL**, **arm** via QGC.
+3. Gerakkan **stik throttle**: atas = maju, bawah = mundur, tengah = berhenti.
+4. Amati arah putaran thruster.
 
-### 1) Hidupkan Pixhawk + servo
+### B) Tes otomatis maju/mundur (pakai Python)
 
-Nyalakan Pixhawk (pastikan switch RC/kill dalam kondisi aman), servo ikut
-stabil. Lihat di QGC laptop bahwa Pixhawk muncul & **armed**.
+1. Di QGC: **putuskan link SERIAL** ke Pixhawk
+   (Application Settings → Comm Links → Disconnect). QGC boleh tetap buka.
+2. Jalankan:
+   ```powershell
+   python sweep.py --serial COM3
+   ```
+   Ganti `COM3` dengan COM dari Device Manager. Kosongkan `--serial` untuk
+   auto-detect.
+3. Siklus: `netral → MAJU penuh → netral → MUNDUR penuh → netral`,
+   tiap posisi ditahan 2 detik (`--hold 3` untuk 3 detik,
+   `--cycles 2` untuk 2 putaran saja).
+4. Berhenti dengan **Ctrl+C** — netral otomatis dikirim, thruster berhenti.
 
-### 2) Jalankan router di mini PC
+### C) Router + failsafe (opsional, lanjutan)
 
-```bash
-# QGC ada di mini PC yang sama:
-.venv/bin/python3 main.py
-
-# QGC di laptop lain (ganti IP laptop):
-.venv/bin/python3 main.py --gcs udpout:192.168.1.50:14550
-
-# Port serial tidak ke-detect? Beri tahu path-nya:
-.venv/bin/python3 main.py --serial /dev/ttyACM0 --baud 115200
-```
-
-Log per detik menampilkan: `mode = [...]`, jumlah paket, dan `v / w`
-terakhir. Contoh keluaran sehat:
-
-```
-[INFO] Link GCS aktif: udpout:127.0.0.1:14550 ...
-[INFO] Pixhawk terhubung via /dev/ttyACM0 @ 115200 baud
-[INFO] mode= [MANUAL] custom=0 ARMED | QGC(rx 0.2s lalu) | pkt GCS=420 PX=910 MAN=112 | v=+0.00 w=+0.12
-```
-
-### 3) Hubungkan QGC laptop
-
-QGC → `Applications Settings → Comm Links → Add → UDP` → port **14550**.
-Nyalakan link itu. Telemetri Pixhawk akan muncul di QGC (mode, attitude,
-dll).
-
-### 4) Kendali manual
-
-1. Set mode Pixhawk ke **MANUAL/GUIDED manual** lewat QGC (Flight mode).
-2. Gerakkan joystick: **throttle stik kiri** = maju/mundur, **stik kanan**
-   = kiri/kanan.
-3. Servo arah ikut bergerak; di terminal mini PC lihat `v / w` berubah.
-
-### 5) Failsafe (uji wajib)
-
-Matikan link QGC (Disconnect) — dalam **≤ 1,5 detik** terminal mencetak
-peringatan `QGC tidak mengirim... -> netral` dan skrip terus mengirim
-netral sampai QGC hidup lagi. Servo diharapkan kembali ke posisi tengah.
-
----
-
-## Tes servo otomatis (menggerakkan kiri-kanan)
-
-```bash
-.venv/bin/python3 sweep.py                 # auto-detect port
-.venv/bin/python3 sweep.py --baud 57600    # kalau via TELEM2
-```
-
-Siklus: netral → kanan penuh → netral → kiri penuh → netral (tiap posisi
-ditahan 2 detik). Gunakan untuk memastikan **arah & batas servo** benar.
-
----
-
-## Pemetaan tongkat QGC → gerak
-
-| QGC (default joystick) | Pesan MAVLink | Gerak kapal |
-|---|---|---|
-| Stik kiri vertikal (throttle) | `z` 0–1000 | **v** = surge (maju/mundur) |
-| Stik kanan horizontal (yaw) | `r` ±127 | **w** = yaw (belok kiri/kanan) |
-| Stik lain / tombol | `x/y/buttons` | diabaikan (ASV 2 DOF) |
-
-Jika arah terbalik (stik kanan = belok kiri), periksa **arah channel
-servo** di QGC (REVERSED) atau balik arah `r` di lapangan lewat opsi
-`--reverse` pada versi berikutnya — lebih baik balik di QGC.
+`python main.py --serial COM3` menjembatani QGC ↔ Pixhawk via UDP
+`127.0.0.1:14550` (putuskan link serial QGC dulu, QGC pakai link UDP
+listen 14550). Kelebihannya: kalau QGC putus > 1,5 detik, skrip otomatis
+kirim netral (thruster berhenti).
 
 ---
 
@@ -170,27 +86,16 @@ servo** di QGC (REVERSED) atau balik arah `r` di lapangan lewat opsi
 
 | Gejala | Cek |
 |---|---|
-| `Belum ada port serial terdeteksi` | `ls /dev/serial/by-id/`, `ls /dev/ttyACM*`; kalau tetap tidak ada: `--serial /dev/ttyACM0` |
-| QGC tidak dapat telemetri | Link UDP listen 14550 di QGC; IP `--gcs` benar; firewall tidak memblokir |
-| Servo diam, w berubah di log | Pixhawk belum armed; mode bukan MANUAL; channel servo salah; servo perlu BEC |
-| Log `Forward gagal` beruntun | Link QGC belum aktif — nyalakan Comm Link dulu (aman, otomatis retry) |
-| `v=+/-` penuh walau stik di tengah | Kalibrasi ulang joystick di QGC (center/deadband) |
-| Peringatan `QGC tidak mengirim` terus | Cek kabel/network; netral terus dikirim (itulah failsafe-nya) |
+| `Port serial tidak ditemukan` | Device Manager → Ports (COM & LPT); cabut-colok USB Pixhawk; coba `--serial COMx` manual |
+| `Port dipakai aplikasi lain` | Putuskan link serial QGC dulu (aturan emas di atas) |
+| Thruster diam saat MAJU/MUNDUR | Pixhawk belum arm; bukan mode MANUAL; ESC belum kalibrasi / belum bunyi beep; kabel sinyal di channel salah |
+| Thruster muter terus setelah ^C | Jangan cabut USB dulu — tunggu log `netral dikirim`; cek ESC kalibrasi |
+| QGC tidak dapat telemetri (mode C) | QGC pakai link UDP listen **14550**; IP `--gcs` default `127.0.0.1` sudah benar untuk NUC yang sama; cek firewall Windows untuk UDP |
 
 ---
 
-## Catatan teknis
+## Uji (developer)
 
-- Router meneruskan paket **bit-for-bit** (`get_msgbuf()`) sehingga QGC
-  tetap melihat koneksi penuh (MAVLink1/2 otomatis).
-- Failsafe hanya aktif setelah QGC pernah mengirim (agar tidak menabrak
-  setup sebelum QGC nyambung).
-- `Ctrl+C` pada `main.py` & `sweep.py` selalu mengirim netral dulu lalu
-  menutup koneksi.
-
-## Uji
-
-```bash
-cd servo_qgc
-python3 -m unittest discover -s tests -v
+```powershell
+python -m unittest discover -s tests -v
 ```
