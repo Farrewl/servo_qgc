@@ -1,6 +1,7 @@
 import argparse
 import logging
 import signal
+import socket
 import sys
 import time
 
@@ -59,6 +60,7 @@ class Router(object):
         self._last_neutral = None
         self._last_log = 0.0
         self._last_warn = 0.0
+        self._last_sock_warn = 0.0
         self._mode_txt = "?"
         # Penghitung untuk log ringkasan/diagnosis.
         self.n_gcs = 0
@@ -100,11 +102,21 @@ class Router(object):
             return False
 
     def _ensure_gcs(self):
-        """Buka link UDP ke QGC (udpout: alamat QGC)."""
+        """Buka link UDP ke QGC (udpout: alamat QGC).
+
+        Di Windows, socket UDP hasil `mavlink_connection("udpout:...")`
+        belum di-bind ke port lokal sehingga `recvfrom` melempar
+        `OSError: [WinError 10022]`. Bind ke ephemeral port agar socket
+        legal untuk baca maupun tulis.
+        """
         if self.gcs is not None:
             return True
         try:
             self.gcs = mavutil.mavlink_connection(self._gcs_addr)
+            try:
+                self.gcs.port.bind(("", 0))
+            except OSError as exc:
+                log.debug("Bind socket GCS lokal diabaikan: %s", exc)
             log.info("Link GCS aktif: %s (pastikan QGC listen UDP 14550)",
                      self._gcs_addr)
             return True
@@ -114,14 +126,33 @@ class Router(object):
             return False
 
     # ---------------------------------------------------------- routing
+    def _note_socket_error(self, exc):
+        """Catat socket error max 1x per WARN_INTERVAL_S. Return True = lanjut."""
+        now = time.monotonic()
+        if now - self._last_sock_warn >= WARN_INTERVAL_S:
+            self._last_sock_warn = now
+            log.warning("Socket baca gagal (%s) — menunggu, bukan crash.", exc)
+        return True
+
     def _forward(self, src, dst, from_gcs):
         """Drain semua paket dari `src`, teruskan raw ke `dst` + pantau.
 
         from_gcs=True  : paket QGC->Pixhawk (catat waktu terima utk failsafe).
         from_gcs=False : paket Pixhawk->QGC (HEARTBEAT dipantau utk mode).
+
+        Socket error (mis. UDP belum ada lawan di Windows) dianggap
+        "belum ada data" — router tetap hidup menunggu, bukan crash.
         """
         while True:
-            msg = src.recv_match(blocking=False)
+            try:
+                msg = src.recv_match(blocking=False)
+            except (OSError, socket.error) as exc:
+                if not self._note_socket_error(exc):
+                    break
+                return
+            except Exception as exc:
+                log.debug("recv_match gagal: %s", exc)
+                return
             if msg is None:
                 break
             if from_gcs:

@@ -91,6 +91,7 @@ kirim netral (thruster berhenti).
 | Thruster diam saat MAJU/MUNDUR | Pixhawk belum arm; bukan mode MANUAL; ESC belum kalibrasi / belum bunyi beep; kabel sinyal di channel salah |
 | Thruster muter terus setelah ^C | Jangan cabut USB dulu — tunggu log `netral dikirim`; cek ESC kalibrasi |
 | QGC tidak dapat telemetri (mode C) | QGC pakai link UDP listen **14550**; IP `--gcs` default `127.0.0.1` sudah benar untuk NUC yang sama; cek firewall Windows untuk UDP |
+| `OSError: [WinError 10022]` (versi lama) | Update `main.py` ke versi terbaru (socket UDP sekarang di-bind otomatis + socket error tidak bikin crash) |
 
 ---
 
