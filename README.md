@@ -93,6 +93,43 @@ kirim netral (thruster berhenti).
 | QGC tidak dapat telemetri (mode C) | QGC pakai link UDP listen **14550**; IP `--gcs` default `127.0.0.1` sudah benar untuk NUC yang sama; cek firewall Windows untuk UDP |
 | `OSError: [WinError 10022]` (versi lama) | Update `main.py` ke versi terbaru (socket UDP sekarang di-bind otomatis + socket error tidak bikin crash) |
 
+### D) Tes thruster via mode OFFBOARD (PX4 v1.17, tanpa GPS)
+
+Dipakai kalau butuh mode Offboard (bukan MANUAL). Prinsip PX4: **stream
+setpoint dulu, baru boleh pindah mode** — kalau belum ada stream, QGC
+menolak dengan `Switching to mode 'Offboard' is currently not possible:
+No offboard signal`.
+
+1. Set sekali via QGC → Parameters (lalu **reboot** Pixhawk):
+   - `MAV_FWDEXTSP = 1` — teruskan setpoint eksternal ke modul rover
+     (default 0 = setpoint dibuang, Offboard mustahil).
+   - `COM_ARM_WO_GPS = 1` — boleh arm tanpa GPS (bench indoor).
+2. Putuskan link serial QGC, lalu:
+   ```powershell
+   python offboard_thrust.py --serial COM3
+   ```
+3. Alur otomatis: stream vx=0 @10Hz selama 3 detik → masuk OFFBOARD →
+   hitung mundur 3 detik → arm. Kontrol: `W/S` tambah/kurang maju
+   (default langkah 0.5 m/s, maks 2 m/s), `X`/Spasi berhenti,
+   `O` masuk Offboard lagi kalau kepental, `Q` keluar aman
+   (vx=0 → MANUAL → disarm).
+4. Verifikasi tanpa gerak dulu (aman):
+   ```powershell
+   python offboard_thrust.py --serial COM3 --no-arm
+   ```
+   QGC harus tampil mode **Offboard**. Kalau tetap ditolak, baca log
+   script: GPS/EKF ikut dilaporkan tiap start.
+5. Catatan tanpa GPS: Offboard butuh estimasi gerak minimal yang valid
+   (attitude + heading). Kalau EKF tetap menolak, fallback-nya mode
+   MANUAL (cara A) — itu selalu bisa.
+
+| Gejala (Offboard) | Cek |
+|---|---|
+| `No offboard signal` | Script **belum jalan** saat pencet mode di QGC — stream harus dari `offboard_thrust.py`, bukan dari QGC/Xbox; `MAV_FWDEXTSP` harus 1 + reboot |
+| `Gagal masuk OFFBOARD` | `MAV_FWDEXTSP=1` + reboot; cek log GPS/EKF di awal script |
+| `ARM ditolak` | `COM_ARM_WO_GPS=1` + reboot; cek pre-arm check di QGC |
+| Kepental keluar Offboard | Stream putus > `COM_OF_LOSS_T` — jangan tutup/suspend script; tekan `O` untuk masuk lagi |
+
 ---
 
 ## Uji (developer)

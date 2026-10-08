@@ -4,10 +4,7 @@ import signal
 import sys
 import time
 
-from pymavlink import mavutil
-
-from mavlink_util import (detect_serial_uart, is_port_busy_error,
-                          manual_send, neutral_manual_send)
+from mavlink_util import connect_px, manual_send, neutral_manual_send
 
 DEFAULT_BAUD = 115200
 DEFAULT_HOLD_S = 2.0         # lama tahan tiap posisi (biar kelihatan)
@@ -23,32 +20,6 @@ SWEEP_STEPS = (
 )
 
 log = logging.getLogger("servo_qgc")
-
-
-def connect_px(serial_path, baud):
-    """Konek serial ke Pixhawk, auto-detect bila path kosong."""
-    if serial_path:
-        path = serial_path
-    else:
-        candidates = detect_serial_uart()
-        if candidates:
-            log.info("Port kandidat: %s", ", ".join(candidates))
-        path = candidates[0] if candidates else ""
-    if not path:
-        log.error("Port serial tidak ditemukan. Cek Device Manager > "
-                  "Ports (COM & LPT), colok USB Pixhawk lalu coba lagi.")
-        return None
-    try:
-        px = mavutil.mavlink_connection(path, baud=baud)
-        log.info("Pixhawk terhubung via %s @ %d baud", path, baud)
-        return px
-    except Exception as exc:
-        if is_port_busy_error(exc):
-            log.error("Port %s dipakai aplikasi lain — putuskan link serial "
-                      "QGC ke Pixhawk dulu lalu coba lagi.", path)
-        else:
-            log.error("Koneksi serial gagal (%s): %s", path, exc)
-        return None
 
 
 def main(argv=None):

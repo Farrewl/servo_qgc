@@ -118,3 +118,37 @@ def detect_serial_uart():
     for pattern in ("/dev/serial/by-id/*", "/dev/ttyACM*", "/dev/ttyUSB*"):
         candidates += sorted(glob.glob(pattern))
     return candidates
+
+
+def connect_px(serial_path, baud, log=None):
+    """Konek serial ke Pixhawk, auto-detect bila path kosong.
+
+    Dipakai bersama oleh sweep.py & offboard_thrust.py. Return koneksi
+    pymavlink atau None (dengan pesan error yang jelas lebih dulu).
+    """
+    import logging as _logging
+
+    log = log or _logging.getLogger("servo_qgc")
+    if serial_path:
+        path = serial_path
+    else:
+        candidates = detect_serial_uart()
+        if candidates:
+            log.info("Port kandidat: %s", ", ".join(candidates))
+        path = candidates[0] if candidates else ""
+    if not path:
+        log.error("Port serial tidak ditemukan. Cek Device Manager > "
+                  "Ports (COM & LPT), colok USB Pixhawk lalu coba lagi.")
+        return None
+    try:
+        from pymavlink import mavutil
+        px = mavutil.mavlink_connection(path, baud=baud)
+        log.info("Pixhawk terhubung via %s @ %d baud", path, baud)
+        return px
+    except Exception as exc:
+        if is_port_busy_error(exc):
+            log.error("Port %s dipakai aplikasi lain — putuskan link serial "
+                      "QGC ke Pixhawk dulu lalu coba lagi.", path)
+        else:
+            log.error("Koneksi serial gagal (%s): %s", path, exc)
+        return None
